@@ -1,3 +1,17 @@
+"""embeddings.py
+嵌入（Embedding）生成与模型端点适配层。
+
+职责：
+1. 提供统一的 `embedding_model` 工厂，根据配置返回不同提供商（OpenAI / Google Gemini / Azure / HuggingFace / Ollama）实现。
+2. 封装调用 HTTP Embedding 服务的 `EmbeddingEndpoint`。
+3. 提供向量长度填充 (`query_embedding`) 及文本分块、截断、编码工具。
+
+说明：
+ - 保持原函数/类签名不变，仅添加中文注释。
+ - 不翻译对外协议/模型名称，避免调用失败。
+ - 可能的改进留在注释中（如: tokenizer max_length 获取策略、异常分类）。
+"""
+
 import uuid
 from typing import Any, List, Optional
 

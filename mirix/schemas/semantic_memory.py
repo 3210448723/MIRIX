@@ -1,3 +1,18 @@
+"""semantic_memory.py
+语义记忆（Semantic Memory）数据模型。
+
+语义记忆用于存储抽象、概念性、相对稳定的知识点（区别于 episodic 的具体时间事件）。
+结构划分：
+1. SemanticMemoryItemBase：公共内容字段。
+2. SemanticMemoryItem：实际持久化实体，含 id / 时间戳 / 嵌入向量 / 组织与用户上下文。
+3. SemanticMemoryItemUpdate：Patch 模型，仅更新提供的字段。
+
+嵌入说明：summary / details / name 三段文本可分别生成向量，用于语义检索。
+验证器会自动做零填充，确保长度统一到 MAX_EMBEDDING_DIM，便于数据库列定长存储或向量索引。
+
+仅添加中文注释，不改变任何业务逻辑。
+"""
+
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
@@ -9,8 +24,12 @@ from mirix.utils import get_utc_time
 from mirix.schemas.embedding_config import EmbeddingConfig
 
 class SemanticMemoryItemBase(MirixBase):
-    """
-    Base schema for storing semantic memory items (e.g., general knowledge, concepts, facts).
+    """Base schema for storing semantic memory items (e.g., general knowledge, concepts, facts).
+
+    中文：语义记忆基础模型。
+    name/summary/details：表示知识点的名称、摘要与详细描述。
+    source：信息来源（便于溯源 / 可信度评估）。
+    tree_path：层级分类路径（如 ['favorites','pets','dog']），支持分层过滤与聚合。
     """
     __id_prefix__ = "sem_item"
     name: str = Field(..., description="The name or main concept/object for the knowledge entry")
@@ -20,8 +39,12 @@ class SemanticMemoryItemBase(MirixBase):
     tree_path: List[str] = Field(..., description="Hierarchical categorization path as an array of strings (e.g., ['favorites', 'pets', 'dog'])")
 
 class SemanticMemoryItem(SemanticMemoryItemBase):
-    """
-    Full semantic memory item schema, including database-related fields.
+    """Full semantic memory item schema, including database-related fields.
+
+    中文：语义记忆实体，含持久化必需的 id / created_at / updated_at / last_modify。
+    * embeddings: name / summary / details 各自可生成独立向量；缺失时为 None。
+    * last_modify：记录最近操作（operation + timestamp），便于审计或排序。
+    * 统一维度填充在 pad_embeddings 验证器中完成。
     """
     id: Optional[str] = Field(None, description="Unique identifier for the semantic memory item")
     user_id: str = Field(..., description="The id of the user who generated the semantic memory")
@@ -52,8 +75,10 @@ class SemanticMemoryItem(SemanticMemoryItemBase):
         return embedding
 
 class SemanticMemoryItemUpdate(MirixBase):
-    """
-    Schema for updating an existing semantic memory item.
+    """Schema for updating an existing semantic memory item.
+
+    中文：语义记忆 Patch 更新模型。除 id 外字段均可选；仅对提供内容执行局部更新。
+    updated_at 自动刷新；上层逻辑可在检测到文本字段变化时重新生成对应 embedding。
     """
     id: str = Field(..., description="Unique ID for this semantic memory entry")
     name: Optional[str] = Field(None, description="The name or main concept for the knowledge entry")

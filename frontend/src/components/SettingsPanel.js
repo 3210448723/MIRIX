@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import './SettingsPanel.css';
 import queuedFetch from '../utils/requestQueue';
 import LocalModelModal from './LocalModelModal';
@@ -236,7 +236,10 @@ const SettingsPanel = ({ settings, onSettingsChange, onApiKeyCheck, onApiKeyRequ
         const data = await response.json();
         console.log('Users data:', data);
         const usersList = data.users || [];
-        setUsers(usersList);
+        setUsers(prev => {
+          const changed = JSON.stringify(prev) !== JSON.stringify(usersList);
+          return changed ? usersList : prev;
+        });
         
         // Set current user (find user with active status)
         const activeUser = usersList.find(user => user.status === 'active');
@@ -276,8 +279,11 @@ const SettingsPanel = ({ settings, onSettingsChange, onApiKeyCheck, onApiKeyRequ
         const filteredResults = selectedCategory === 'All' || selectedCategory === t('settings.mcp.filterAll')
           ? results 
           : results.filter(server => server.category === selectedCategory);
-          
-        setMcpSearchResults(filteredResults);
+        // Only update if changed
+        setMcpSearchResults(prev => {
+          const changed = JSON.stringify(prev) !== JSON.stringify(filteredResults);
+          return changed ? filteredResults : prev;
+        });
       }
     } catch (error) {
       console.error('Error searching MCP marketplace:', error);
@@ -558,35 +564,68 @@ const SettingsPanel = ({ settings, onSettingsChange, onApiKeyCheck, onApiKeyRequ
     }
   }, [settings.serverUrl, fetchCoreMemoryPersona]);
 
-  // Fetch initial data only when serverUrl is available
+  // Track if initial full load for current serverUrl was performed
+  const initialLoadRef = useRef({ serverUrl: null, loaded: false, loadedAt: 0 });
+
+  // Full initial load when serverUrl changes (once per serverUrl)
   useEffect(() => {
-    if (settings.serverUrl) {
-      console.log('SettingsPanel: serverUrl is available, fetching initial data');
-      fetchPersonaDetails();
-      fetchCoreMemoryPersona();
-      fetchCurrentModel();
-      fetchCurrentMemoryModel();
-      fetchCurrentTimezone();
-      fetchCustomModels();
-      fetchMcpMarketplace();
-      fetchUsers();
+    if (!settings.serverUrl) return;
+    if (initialLoadRef.current.serverUrl !== settings.serverUrl) {
+      // Reset for new server
+      initialLoadRef.current = { serverUrl: settings.serverUrl, loaded: false, loadedAt: 0 };
+    }
+    if (!initialLoadRef.current.loaded) {
+      console.log('SettingsPanel: initial full fetch for serverUrl', settings.serverUrl);
+      (async () => {
+        await Promise.all([
+          fetchPersonaDetails(),
+          fetchCoreMemoryPersona(),
+          fetchCurrentModel(),
+          fetchCurrentMemoryModel(),
+          fetchCurrentTimezone(),
+          fetchCustomModels(),
+          fetchMcpMarketplace(),
+          fetchUsers()
+        ]);
+        initialLoadRef.current.loaded = true;
+        initialLoadRef.current.loadedAt = Date.now();
+      })();
     }
   }, [settings.serverUrl, fetchPersonaDetails, fetchCoreMemoryPersona, fetchCurrentModel, fetchCurrentMemoryModel, fetchCurrentTimezone, fetchCustomModels, fetchMcpMarketplace, fetchUsers]);
 
-  // Fetch current models and timezone whenever settings panel becomes visible
+  // When panel becomes visible: light refresh if initial full load already done recently, else ensure full load
   useEffect(() => {
-    if (isVisible && settings.serverUrl) {
-      console.log('SettingsPanel: became visible, refreshing current models and timezone');
+    if (!isVisible || !settings.serverUrl) return;
+    const now = Date.now();
+    const recentlyLoaded = initialLoadRef.current.loaded && (now - initialLoadRef.current.loadedAt < 4000);
+    if (!initialLoadRef.current.loaded) {
+      // Fallback: if somehow not loaded yet, trigger full load
+      console.log('SettingsPanel: visible & no initial load yet -> full fetch');
+      (async () => {
+        await Promise.all([
+          fetchPersonaDetails(),
+          fetchCoreMemoryPersona(),
+          fetchCurrentModel(),
+          fetchCurrentMemoryModel(),
+          fetchCurrentTimezone(),
+          fetchCustomModels(),
+          fetchMcpMarketplace(),
+          fetchUsers()
+        ]);
+        initialLoadRef.current.loaded = true;
+        initialLoadRef.current.loadedAt = Date.now();
+      })();
+    } else if (!recentlyLoaded) {
+      console.log('SettingsPanel: visible -> light refresh (models/timezone/users/MCP status)');
       fetchCurrentModel();
       fetchCurrentMemoryModel();
       fetchCurrentTimezone();
-      fetchCustomModels();
-      fetchMcpMarketplace();
       fetchUsers();
-      // Also refresh MCP status to ensure connections are shown correctly
       refreshMcpStatus();
+    } else {
+      console.log('SettingsPanel: visible -> skip refresh (recent full load)');
     }
-  }, [isVisible, settings.serverUrl, fetchCurrentModel, fetchCurrentMemoryModel, fetchCurrentTimezone, fetchCustomModels, fetchMcpMarketplace, fetchUsers, refreshMcpStatus]);
+  }, [isVisible, settings.serverUrl, fetchPersonaDetails, fetchCoreMemoryPersona, fetchCurrentModel, fetchCurrentMemoryModel, fetchCurrentTimezone, fetchCustomModels, fetchMcpMarketplace, fetchUsers, refreshMcpStatus]);
 
   // Refresh all backend data when backend reconnects
   useEffect(() => {

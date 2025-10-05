@@ -1,0 +1,5 @@
+agent_name: mirix
+model_name: gpt-4.1-mini
+model_endpoint: http://localhost:9595/v1
+model_provider: local_server
+api_key: EMPTY

@@ -492,8 +492,11 @@ function createWindow() {
     show: false
   });
 
-  const startUrl = actuallyDev 
-    ? 'http://localhost:3000' 
+  // Frontend dev server port resolution (no hard-coded literal)
+  // Priority: FRONTEND_PORT > PORT > default 3000
+  const FRONTEND_DEV_PORT = parseInt(process.env.FRONTEND_PORT || process.env.PORT || '3000', 10);
+  const startUrl = actuallyDev
+    ? `http://localhost:${FRONTEND_DEV_PORT}`
     : `file://${path.join(__dirname, '../build/index.html')}`;
   
   mainWindow.loadURL(startUrl);

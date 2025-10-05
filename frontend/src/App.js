@@ -334,9 +334,10 @@ function App() {
     };
   }, [checkBackendHealth]);
 
-  const handleSettingsChange = (newSettings) => {
+  // Memoize to avoid changing identity every render (prevents child effects from re-running endlessly)
+  const handleSettingsChange = useCallback((newSettings) => {
     setSettings(prev => ({ ...prev, ...newSettings }));
-  };
+  }, []);
 
 
 

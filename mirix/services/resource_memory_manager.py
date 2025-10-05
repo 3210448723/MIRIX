@@ -1,3 +1,15 @@
+"""resource_memory_manager.py
+资源记忆管理器（ResourceMemoryManager）：负责文档/文件片段/外部资源的存取与检索逻辑。
+
+职责（仅新增中文说明，不改动逻辑）：
+1. CRUD 操作（创建、更新、删除、按 ID 获取）。
+2. 检索：embedding / string_match / bm25（PostgreSQL 原生）/ fuzzy_match。
+3. PostgreSQL 全文：to_tsvector + ts_rank_cd；SQLite 退化为内存 BM25。
+4. 向量解析：兼容 JSON 字符串、数组、二进制等格式。
+
+字段特点：summary（摘要）、content（正文）、resource_type（内容类型）、tree_path（层级分类）、metadata_（扩展元数据）。
+"""
+
 import uuid
 from typing import List, Optional, Dict, Any
 import json
@@ -24,7 +36,10 @@ from mirix.helpers.converters import deserialize_vector
 from mirix.constants import BUILD_EMBEDDINGS_FOR_MEMORY
 
 class ResourceMemoryManager:
-    """Manager class to handle logic related to Resource/Workspace Memory Items."""
+    """Manager class to handle logic related to Resource/Workspace Memory Items.
+
+    中文：资源记忆管理器，聚焦文档/片段型信息的检索与存储。
+    """
 
     def __init__(self):
         from mirix.server.server import db_context
@@ -33,6 +48,7 @@ class ResourceMemoryManager:
     def _clean_text_for_search(self, text: str) -> str:
         """
         Clean text by removing punctuation and normalizing whitespace.
+        中文：统一清洗流程：去标点 -> 小写 -> 压缩空白。
         
         Args:
             text: Input text to clean
@@ -56,6 +72,7 @@ class ResourceMemoryManager:
     def _preprocess_text_for_bm25(self, text: str) -> List[str]:
         """
         Preprocess text for BM25 search by tokenizing and cleaning.
+        中文：BM25 预处理，拆分 token 并移除过短项。
         
         Args:
             text: Input text to preprocess
@@ -76,6 +93,7 @@ class ResourceMemoryManager:
     def _parse_embedding_field(self, embedding_value):
         """
         Helper method to parse embedding field from different PostgreSQL return formats.
+        中文：解析向量字段的多种可能表示形式（列表/JSON/字符串/二进制）。
         
         Args:
             embedding_value: The raw embedding value from PostgreSQL query
@@ -450,6 +468,7 @@ class ResourceMemoryManager:
         with self.session_maker() as session:
 
             if query == '':
+                # 中文：空查询 -> 直接按 last_modify.timestamp 倒序返回全部资源记忆（可用于最近资源面板）
                 # Use proper PostgreSQL JSON text extraction and casting for ordering
                 from sqlalchemy import cast, DateTime, text
                 query_stmt = select(ResourceMemoryItem).where(
@@ -458,6 +477,7 @@ class ResourceMemoryManager:
                     cast(text("resource_memory.last_modify ->> 'timestamp'"), DateTime).desc()
                 )
                 if limit:
+                    # 中文：限制数量（前端通常分页或仅需展示前若干条）
                     query_stmt = query_stmt.limit(limit)
                 result = session.execute(query_stmt)
                 resource_memory = result.scalars().all()
@@ -482,9 +502,11 @@ class ResourceMemoryManager:
             )
 
             if search_method == 'string_match':
+                # 中文：简单字符串包含匹配（LOWER(field) LIKE '%query%'）
                 main_query = base_query.where(func.lower(getattr(ResourceMemoryItem, search_field)).contains(query.lower()))
             
             elif search_method == 'embedding':
+                # 中文：向量语义检索，动态选择 content/summary/title 对应 embedding 列
                 embed_query = True
                 embedding_config = agent_state.embedding_config
 
@@ -499,6 +521,8 @@ class ResourceMemoryManager:
                 )
 
             elif search_method == 'bm25':
+                # 中文：相关性检索
+                # PostgreSQL -> 原生全文；SQLite -> 内存 BM25 (加载全部内存，注意规模)
                 
                 # Check if we're using PostgreSQL - use native full-text search if available
                 if settings.mirix_pg_uri_no_default:
@@ -507,6 +531,7 @@ class ResourceMemoryManager:
                         session, base_query, query, search_field, limit, actor
                     )
                 else:
+                    # 中文：SQLite 退化 BM25 流程，同其它 manager：收集 tokens -> 评分 -> 排序
                     # Fallback to in-memory BM25 for SQLite (legacy method)
                     # Load all candidate items (memory-intensive, kept for compatibility)
                     result = session.execute(select(ResourceMemoryItem).where(
@@ -576,6 +601,7 @@ class ResourceMemoryManager:
             resource_memory = []
 
             for row in results:
+                # 中文：行数据 -> dict -> ORM -> Pydantic
                 data = dict(row._mapping)
                 resource_memory.append(ResourceMemoryItem(**data))
             

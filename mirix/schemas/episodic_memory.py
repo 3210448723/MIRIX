@@ -1,3 +1,17 @@
+"""episodic_memory.py
+情节记忆（Episodic Memory）相关 Pydantic Schema 定义。
+
+设计目的：
+1. 以事件（Event）为粒度记录时间相关的交互或状态（如一次用户输入、一段系统推理、一个系统通知）。
+2. 支持可选嵌入（embeddings）字段，用于语义检索与相似度搜索。
+3. 提供三类模型：
+    - Base / ForLLM：输入创建用（ForLLM 中时间戳字符串形式，便于 LLM 构造）。
+    - EpisodicEvent：系统内部 & DB 存储实体（包含时间、组织、多租户、嵌入、修改记录等）。
+    - EpisodicEventUpdate：更新数据时的部分字段补丁模型。
+
+说明：仅添加中文注释，不改动现有字段/逻辑。原英文描述保留以兼容现有依赖（文档 / OpenAPI）。
+"""
+
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 

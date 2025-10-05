@@ -141,7 +141,7 @@ from contextlib import contextmanager
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from mirix.config import MirixConfig
@@ -270,6 +270,52 @@ if USE_PGLITE:
         print("Falling back to SQLite mode")
         USE_PGLITE = False
 
+def _diagnose_postgres_engine(engine):
+    """Run basic diagnostics on Postgres engine: password, pgvector extension availability.
+
+    This tries to give users clear Chinese guidance instead of opaque stack traces.
+    """
+    try:
+        with engine.connect() as conn:
+            # 1. 检查是否有向量类型需求 (ORM 中是否引用 VECTOR)
+            need_vector = False
+            try:
+                # 粗略扫描 metadata 中 column 类型名字包含 'VECTOR'
+                for tbl in Base.metadata.sorted_tables:
+                    for col in tbl.columns:
+                        if getattr(col.type, '__class__', None) and 'VECTOR' in col.type.__class__.__name__.upper():
+                            need_vector = True
+                            break
+                    if need_vector:
+                        break
+            except Exception:
+                pass
+
+            if need_vector:
+                # 2. 检查 vector 扩展
+                has_vector = False
+                try:
+                    res = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname='vector';")).fetchone()
+                    has_vector = res is not None
+                except Exception as e:  # pragma: no cover
+                    print(f"[启动诊断] 查询 vector 扩展时出错: {e}")
+
+                if not has_vector:
+                    print("[启动诊断] 检测到模型需要 pgvector 扩展 (VECTOR 列), 但当前数据库未安装扩展 'vector'.")
+                    print("[启动诊断] 尝试自动创建扩展: CREATE EXTENSION IF NOT EXISTS vector; (需要超级用户权限)")
+                    try:
+                        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+                        print("[启动诊断] 已尝试创建 pgvector 扩展，继续初始化...")
+                    except Exception as e:
+                        print("[启动诊断][警告] 自动创建 pgvector 失败。请手动执行: sudo -u postgres psql -d mirix -c 'CREATE EXTENSION vector;'")
+                        print(f"[启动诊断] 失败原因: {e}")
+                        print("[启动诊断] 如果系统未安装，请先安装: sudo apt-get install -y postgresql-$(psql -V | awk '{print $3}' | cut -d. -f1)-pgvector 或 postgresql-pgvector")
+            else:
+                print("[启动诊断] 未发现需要 VECTOR 类型的列，跳过 pgvector 检查。")
+    except Exception as e:  # pragma: no cover
+        print(f"[启动诊断] 数据库诊断过程中发生未处理异常: {e}")
+
+
 if not USE_PGLITE and settings.mirix_pg_uri_no_default:
     print("Creating engine", settings.mirix_pg_uri)
     config.recall_storage_type = "postgres"
@@ -287,8 +333,23 @@ if not USE_PGLITE and settings.mirix_pg_uri_no_default:
         echo=settings.pg_echo,
     )
     
-    # Create all tables for PostgreSQL
-    Base.metadata.create_all(bind=engine)
+    # 连接诊断（在创建表前，以便更快暴露缺失扩展问题）
+    try:
+        _diagnose_postgres_engine(engine)
+    except Exception as e:  # pragma: no cover
+        print(f"[启动诊断] 执行数据库诊断时出错 (继续): {e}")
+
+    # Create all tables for PostgreSQL, with clearer error capture
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        print("[启动错误] 创建数据库表失败。常见原因：\n"
+              " 1) 缺少 pgvector 扩展 (执行: CREATE EXTENSION vector;)\n"
+              " 2) 当前用户无权限创建扩展或表\n"
+              " 3) URI 未包含密码或网络不可达\n"
+              " 4) 之前迁移残留导致 schema 冲突\n"
+              "请核对 .env 中 MIRIX_PG_URI，或使用: PGPASSWORD=... psql -h host -U user -d db -c '\\dx'\n")
+        raise
 elif not USE_PGLITE:
     # TODO: don't rely on config storage
     sqlite_db_path = os.path.join(config.recall_storage_path, "sqlite.db")

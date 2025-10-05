@@ -1,3 +1,17 @@
+"""memory_tools.py
+记忆子系统对外暴露的“工具函数”集合。
+
+这些函数多作为 LLM function calling / tool use 的可调用单元，
+用于在不同类别记忆（core / episodic / semantic / resource / procedural / knowledge_vault）中插入、更新、删除或触发异步构建。
+
+设计要点：
+1. 所有函数遵循副作用型（多数返回 None 或简单字符串），便于在 Agent 内部流水线调用。
+2. 通过 self.<memory>_manager 调用真正的存取逻辑，工具层只做参数解析与校验。
+3. 保留英文原文提示（模型可能依赖），新增中文注释便于开发与调试。
+
+注意：不修改任何业务逻辑，仅加注释。
+"""
+
 import re
 from typing import List, Optional
 

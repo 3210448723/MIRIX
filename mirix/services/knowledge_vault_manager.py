@@ -1,3 +1,27 @@
+"""knowledge_vault_manager.py
+知识金库管理器（KnowledgeVaultManager）。
+
+定位：
+    负责“高价值 / 结构化 / 需较高可信度”知识条目的存取与检索。
+
+与语义记忆的差异：
+    - 更强调来源 (source)、敏感级别 (sensitivity)、密钥/机密字段 (secret_value)。
+    - 适合经过审核 / 稳定版本的事实集合；可作为 Agent 回复的优先引用材料。
+
+检索支持：
+    - 向量相似度（embedding）
+    - string_match 直接包含匹配
+    - PostgreSQL 原生全文 + ts_rank_cd 模拟 BM25（bm25）
+    - 模糊匹配 fuzzy_match （兼容旧逻辑 / 不推荐大规模使用）
+
+设计注意：
+    - BUILD_EMBEDDINGS_FOR_MEMORY 关闭时跳过向量生成以降低成本。
+    - _parse_embedding_field 兼容多种数据库返回格式（list/tuple/json/字符串/二进制）。
+    - 后续可扩展：版本控制、引用计数、可信度加权、批量合并与去重。
+
+（本文件补充的全部为中文注释，不修改任何业务逻辑与函数签名。）
+"""
+
 import uuid
 from typing import List, Optional, Dict, Any
 import json
@@ -24,21 +48,21 @@ from mirix.constants import BUILD_EMBEDDINGS_FOR_MEMORY
 
 
 class KnowledgeVaultManager:
-    """Manager class to handle business logic related to Knowledge Vault Items."""
+    """知识金库条目业务逻辑管理器。
+
+    中文补充：提供条目的 CRUD + 多策略检索；聚焦高价值/受控知识。
+    可与上层 Meta Memory / Memory Agents 协同，支持根据任务需要动态召回。
+    """
 
     def __init__(self):
         from mirix.server.server import db_context
         self.session_maker = db_context
 
     def _clean_text_for_search(self, text: str) -> str:
-        """
-        Clean text by removing punctuation and normalizing whitespace.
-        
-        Args:
-            text: Input text to clean
-            
-        Returns:
-            Cleaned text with punctuation removed and normalized whitespace
+        """清洗文本（去标点 / 小写 / 压缩空白）。
+
+        英文原逻辑：移除标点并标准化空白，提升检索一致性。
+        参数与返回含义保持不变。
         """
         if not text:
             return ""
@@ -54,15 +78,7 @@ class KnowledgeVaultManager:
         return text
 
     def _preprocess_text_for_bm25(self, text: str) -> List[str]:
-        """
-        Preprocess text for BM25 search by tokenizing and cleaning.
-        
-        Args:
-            text: Input text to preprocess
-            
-        Returns:
-            List of cleaned tokens
-        """
+        """BM25 预处理：清洗后按空格分词并过滤过短 token。"""
         if not text:
             return []
         
@@ -74,15 +90,7 @@ class KnowledgeVaultManager:
         return tokens
 
     def _parse_embedding_field(self, embedding_value):
-        """
-        Helper method to parse embedding field from different PostgreSQL return formats.
-        
-        Args:
-            embedding_value: The raw embedding value from PostgreSQL query
-            
-        Returns:
-            List of floats or None if parsing fails
-        """
+        """解析数据库返回的 embedding 原始字段，兼容多格式（list/tuple/json/字符串/二进制）。"""
         if embedding_value is None:
             return None
         
@@ -130,17 +138,7 @@ class KnowledgeVaultManager:
             return None
 
     def _count_word_matches(self, item_data: Dict[str, Any], query_words: List[str], search_field: str = '') -> int:
-        """
-        Count how many of the query words are present in the knowledge vault item data.
-        
-        Args:
-            item_data: Dictionary containing knowledge vault item data
-            query_words: List of query words to search for
-            search_field: Specific field to search in, or empty string to search all text fields
-            
-        Returns:
-            Number of query words found in the item
-        """
+        """简单计数匹配：统计查询词在指定字段集合中的出现数，用作粗粒度评分。"""
         if not query_words:
             return 0
         
@@ -179,21 +177,7 @@ class KnowledgeVaultManager:
         return word_matches
 
     def _postgresql_fulltext_search(self, session, base_query, query_text, search_field, limit, sensitivity=None, actor=None):
-        """
-        Efficient PostgreSQL-native full-text search using ts_rank_cd for BM25-like functionality.
-        This method leverages PostgreSQL's built-in full-text search capabilities and GIN indexes.
-        
-        Args:
-            session: Database session
-            base_query: Base SQLAlchemy query
-            query_text: Search query string
-            search_field: Field to search in ('caption' or 'secret_value')
-            limit: Maximum number of results to return
-            sensitivity: List of sensitivity levels to filter by
-            
-        Returns:
-            List of KnowledgeVaultItem objects ranked by relevance
-        """
+        """PostgreSQL 原生全文检索（ts_rank_cd）封装，支持前缀匹配与多词 AND/OR 回退。"""
         from sqlalchemy import text, func
         
         # Clean and prepare the search query

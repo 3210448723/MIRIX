@@ -1,3 +1,23 @@
+"""semantic_memory_manager.py
+语义记忆管理器（SemanticMemoryManager）业务逻辑：
+
+职责概览（仅添加中文注释，不改动逻辑）：
+1. 语义记忆 CRUD：创建、更新、删除、按 ID 获取。
+2. 检索策略：
+    - 向量检索（embedding）
+    - 字符串包含（string_match）
+    - PostgreSQL 原生全文 BM25（bm25）或 SQLite 退化为内存 BM25Okapi
+    - 模糊匹配（fuzzy_match，兼容旧实现）
+3. PostgreSQL 全文检索构建：to_tsvector + ts_rank_cd（_postgresql_fulltext_search）。
+4. 向量解析：兼容不同返回格式（_parse_embedding_field）。
+
+说明：
+ - 使用 `AgentState.embedding_config` 选择嵌入模型。
+ - BUILD_EMBEDDINGS_FOR_MEMORY 关闭时跳过向量生成，适合调试或降本。
+ - last_modify 字段用于更新时间 & 操作类型记录。
+ - tree_path 支持层级分类（用于聚类与过滤）。
+"""
+
 import uuid
 import random
 import string
@@ -31,7 +51,10 @@ from mirix.settings import settings
 from mirix.constants import BUILD_EMBEDDINGS_FOR_MEMORY
 
 class SemanticMemoryManager:
-    """Manager class to handle business logic related to Semantic Memory Items."""
+    """Manager class to handle business logic related to Semantic Memory Items.
+
+    中文：语义记忆管理器，负责相对稳定“知识 / 概念”项的增删改查与检索。
+    """
 
     def __init__(self):
         from mirix.server.server import db_context
@@ -40,6 +63,7 @@ class SemanticMemoryManager:
     def _clean_text_for_search(self, text: str) -> str:
         """
         Clean text by removing punctuation and normalizing whitespace.
+        中文：清洗文本（去标点、小写、空白归一）以提高检索一致性。
         
         Args:
             text: Input text to clean
@@ -63,6 +87,7 @@ class SemanticMemoryManager:
     def _preprocess_text_for_bm25(self, text: str) -> List[str]:
         """
         Preprocess text for BM25 search by tokenizing and cleaning.
+        中文：BM25 预处理：清洗 -> 切词 -> 过滤短 token。
         
         Args:
             text: Input text to preprocess
@@ -83,6 +108,7 @@ class SemanticMemoryManager:
     def _parse_embedding_field(self, embedding_value):
         """
         Helper method to parse embedding field from different PostgreSQL return formats.
+        中文：解析数据库返回的嵌入字段，兼容 list/tuple/JSON 字符串/分隔字符串/二进制。
         
         Args:
             embedding_value: The raw embedding value from PostgreSQL query
@@ -140,6 +166,7 @@ class SemanticMemoryManager:
     def _count_word_matches(self, item_data: Dict[str, Any], query_words: List[str], search_field: str = '') -> int:
         """
         Count how many of the query words are present in the semantic memory item data.
+        中文：统计查询词在语义记忆对象中的命中数量（简易匹配评分）。
         
         Args:
             item_data: Dictionary containing semantic memory item data
@@ -187,6 +214,7 @@ class SemanticMemoryManager:
         """
         Efficient PostgreSQL-native full-text search using ts_rank_cd for BM25-like functionality.
         This method leverages PostgreSQL's built-in full-text search capabilities and GIN indexes.
+        中文：PostgreSQL 原生全文检索（权重 + ts_rank_cd），支持 AND -> OR 回退逻辑与前缀匹配。
         
         Args:
             session: Database session
@@ -505,6 +533,8 @@ class SemanticMemoryManager:
         with self.session_maker() as session:
             
             if query == '':
+                # 中文：无查询词 -> 直接按最近更新时间( last_modify.timestamp ) 逆序列出该用户的所有语义记忆
+                # 说明：PostgreSQL 使用 JSON 提取 + cast(DateTime)；SQLite 也能执行 text() 但语义不同，这里保持兼容
                 # Use proper PostgreSQL JSON text extraction and casting for ordering
                 from sqlalchemy import cast, DateTime, text
                 query_stmt = select(SemanticMemoryItem).where(
@@ -513,13 +543,14 @@ class SemanticMemoryManager:
                     cast(text("semantic_memory.last_modify ->> 'timestamp'"), DateTime).desc()
                 )
                 if limit:
+                    # 中文：如果指定 limit，追加 LIMIT 子句以减少 I/O
                     query_stmt = query_stmt.limit(limit)
                 result = session.execute(query_stmt)
                 semantic_items = result.scalars().all()
                 return [item.to_pydantic() for item in semantic_items]
 
             else:
-                
+                # 中文：存在查询词 -> 构建基础列选择（不直接 select *，减少不必要列/便于统一转 Pydantic）
                 base_query = select(
                     SemanticMemoryItem.id.label("id"),
                     SemanticMemoryItem.created_at.label("created_at"),
@@ -541,6 +572,10 @@ class SemanticMemoryManager:
                 )
 
                 if search_method == 'embedding':
+                    # 中文：向量检索路径
+                    # 1. embed_query=True 表明需要对 query_text 做 embedding（若 embedded_text 未提供则内部生成）
+                    # 2. embedding_config 来自 agent_state，保证与存储向量维度/模型一致
+                    # 3. search_field 动态取如 name_embedding / summary_embedding 等
                     embed_query = True
                     embedding_config = agent_state.embedding_config
 
@@ -555,11 +590,15 @@ class SemanticMemoryManager:
                     )
 
                 elif search_method == 'string_match':
-
+                    # 中文：简单字符串包含匹配（LOWER(field) LIKE '%query%'）
+                    # 说明：不做分词/排序，适合快速小集合过滤；大小写统一为 lower()
                     search_field = eval("SemanticMemoryItem." + search_field)
                     main_query = base_query.where(func.lower(search_field).contains(query.lower()))
 
                 elif search_method == 'bm25':
+                    # 中文：文本相关性检索
+                    # PostgreSQL: 使用原生全文（to_tsvector + to_tsquery + ts_rank_cd）=> 高效+可利用 GIN
+                    # SQLite: 回退到内存 BM25Okapi，对所有候选加载内存计算（大数据集会慢）
                     
                     # Check if we're using PostgreSQL - use native full-text search if available
                     if settings.mirix_pg_uri_no_default:
@@ -568,6 +607,10 @@ class SemanticMemoryManager:
                             session, base_query, query, search_field, limit, actor
                         )
                     else:
+                        # 中文：SQLite 退化流程
+                        # 1. 一次性取出该用户全部语义记忆（潜在性能风险）
+                        # 2. 根据 search_field 选文本 -> 清洗分词 -> 构建 BM25 语料
+                        # 3. 对查询同样分词，计算得分排序
                         # Fallback to in-memory BM25 for SQLite (legacy method)
                         # Load all candidate items (memory-intensive, kept for compatibility)
                         result = session.execute(select(SemanticMemoryItem).where(
@@ -583,6 +626,7 @@ class SemanticMemoryManager:
                         valid_items = []
                         
                         for item in all_items:
+                            # 中文：针对不同字段取文本，若 search_field 不存在回退到 name 字段
                             # Determine which field to use for search
                             if search_field and hasattr(item, search_field):
                                 text_to_search = getattr(item, search_field) or ""
@@ -627,6 +671,8 @@ class SemanticMemoryManager:
                         return [item.to_pydantic() for item in semantic_items]
 
                 elif search_method == 'fuzzy_match':
+                    # 中文：模糊匹配流程（rapidfuzz.partial_ratio）
+                    # 说明：适合短查询，对较长文本做子串相似度评分；同样内存加载全部项，性能与 BM25 fallback 相近
                     # Fuzzy matching: load all candidate items into memory and compute a fuzzy match score.
                     result = session.execute(select(SemanticMemoryItem).where(
                         SemanticMemoryItem.user_id == actor.id
@@ -634,6 +680,7 @@ class SemanticMemoryManager:
                     all_items = result.scalars().all()
                     scored_items = []
                     for item in all_items:
+                        # 中文：优先选定指定字段，否则默认 name
                         # Determine which field to use:
                         # 1. If a search_field is provided (e.g., "concept" or "summary") and exists in the item, use it.
                         # 2. Otherwise, default to using the "concept" field.
@@ -651,12 +698,14 @@ class SemanticMemoryManager:
                     return [item.to_pydantic() for item in top_items]
 
                 if limit:
+                    # 中文：应用结果数量限制
                     main_query = main_query.limit(limit)
 
                 results = list(session.execute(main_query))
 
                 semantic_items = []
                 for row in results:
+                    # 中文：raw row -> dict -> ORM 模型实例 -> Pydantic
                     data = dict(row._mapping)
                     semantic_items.append(SemanticMemoryItem(**data))
 

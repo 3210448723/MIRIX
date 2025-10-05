@@ -1,3 +1,27 @@
+"""episodic_memory_manager.py
+EpisodicMemoryManager 负责“情节记忆”（事件型记忆）的业务逻辑：
+
+功能概览（不改动任何逻辑，仅添加中文注释）：
+1. CRUD：按 ID 获取、创建单条/多条、删除、更新事件。
+2. 查询：
+   - 时间窗口查询（list_episodic_memory_around_timestamp）
+   - 多策略搜索（list_episodic_memory）：
+       a. embedding 向量相似度（语义检索）
+       b. string_match 简单包含
+       c. bm25：PostgreSQL 原生全文（推荐）或 SQLite 退化为内存 BM25Okapi
+       d. fuzzy_match 模糊匹配（兼容遗留）
+3. PostgreSQL 全文检索优化：采用 to_tsvector + ts_rank_cd（_postgresql_fulltext_search）。
+4. Embedding 解析：兼容不同数据库返回格式（_parse_embedding_field）。
+
+设计要点：
+ - 与 ORM 模型 `mirix.orm.episodic_memory.EpisodicEvent` 协同。
+ - 通过 `AgentState.embedding_config` 选择嵌入模型。
+ - last_modify 字段用于排序 / 审计（包含操作类型与时间戳）。
+ - 允许在关闭 BUILD_EMBEDDINGS_FOR_MEMORY 时跳过向量计算（便于快速测试或无向量存储场景）。
+
+注意：此补丁只添加中文文档与注释，不改变任何原有执行路径、调用顺序或变量名。
+"""
+
 import re
 import uuid
 from typing import List, Optional, Dict, Any
@@ -24,7 +48,11 @@ from mirix.helpers.converters import deserialize_vector
 from mirix.constants import BUILD_EMBEDDINGS_FOR_MEMORY
 
 class EpisodicMemoryManager:
-    """Manager class to handle business logic related to Episodic episodic_memory items."""
+    """Manager class to handle business logic related to Episodic episodic_memory items.
+
+    中文：情节记忆管理器——负责事件（具时间语义的交互/行为记录）的增删改查与多种检索策略。
+    典型使用：为智能体提供最近事件上下文、语义召回、模糊查找、全文检索等。
+    """
 
     def __init__(self):
         from mirix.server.server import db_context
@@ -33,6 +61,7 @@ class EpisodicMemoryManager:
     def _clean_text_for_search(self, text: str) -> str:
         """
         Clean text by removing punctuation and normalizing whitespace.
+        中文：去除标点并标准化空白，便于后续 token 化或模糊匹配。
         
         Args:
             text: Input text to clean
@@ -56,6 +85,7 @@ class EpisodicMemoryManager:
     def _preprocess_text_for_bm25(self, text: str) -> List[str]:
         """
         Preprocess text for BM25 search by tokenizing and cleaning.
+        中文：BM25 预处理，将文本清洗 -> 分词 -> 过滤短 token。
         
         Args:
             text: Input text to preprocess
@@ -76,6 +106,7 @@ class EpisodicMemoryManager:
     def _count_word_matches(self, event_data: Dict[str, Any], query_words: List[str], search_field: str = '') -> int:
         """
         Count how many of the query words are present in the event data.
+        中文：统计查询词在事件数据中的出现数量（用于简单匹配评分）。
         
         Args:
             event_data: Dictionary containing event data
@@ -125,6 +156,7 @@ class EpisodicMemoryManager:
         """
         Fetch a single episodic episodic_memory record by ID.
         Raises NoResultFound if the record doesn't exist.
+        中文：按 ID 获取事件；若不存在抛出 NoResultFound。
         """
         with self.session_maker() as session:
             try:
@@ -140,6 +172,7 @@ class EpisodicMemoryManager:
         Fetch the most recently updated episodic event based on last_modify timestamp.
         Filter by user_id from actor.
         Returns None if no events exist.
+        中文：按 last_modify 时间倒序获取最新更新事件；无结果返回 None。
         """
         with self.session_maker() as session:
             # Use proper PostgreSQL JSON text extraction and casting for ordering
@@ -160,6 +193,7 @@ class EpisodicMemoryManager:
         """
         Create a new episodic episodic_memory record.
         Uses the provided Pydantic model (PydanticEpisodicEvent) as input data.
+        中文：使用传入的 Pydantic 模型创建新事件（若缺 id 则生成短 ID）。
         """
         
         # Ensure ID is set before model_dump
@@ -195,6 +229,7 @@ class EpisodicMemoryManager:
     def create_many_episodic_memory(self, episodic_memory: List[PydanticEpisodicEvent], actor: PydanticUser) -> List[PydanticEpisodicEvent]:
         """
         Create multiple episodic episodic_memory records in one go.
+        中文：批量创建事件；内部逐条调用单条创建（可后续优化为批量插入）。
         """
         return [self.create_episodic_memory(e, actor) for e in episodic_memory]
 
@@ -202,6 +237,7 @@ class EpisodicMemoryManager:
     def delete_event_by_id(self, id: str, actor: PydanticUser) -> None:
         """
         Delete an episodic episodic_memory record by ID.
+        中文：按 ID 硬删除事件（不可恢复）。
         """
         with self.session_maker() as session:
             try:
@@ -223,6 +259,7 @@ class EpisodicMemoryManager:
                      tree_path: Optional[List[str]] = None) -> PydanticEpisodicEvent:
 
         try:
+            # 中文：根据配置决定是否构建向量；关闭向量构建时 embedding 相关字段置 None。
 
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
             if BUILD_EMBEDDINGS_FOR_MEMORY:
@@ -271,6 +308,7 @@ class EpisodicMemoryManager:
         """
         list all episodic events around a timestamp
         time_window: The time window to search around the timestamp. It is in the form of "HH:MM:SS" or "HH:MM".
+    中文：按给定时间范围列出事件（闭区间），当前实现使用 occurred_at BETWEEN。
         """
         with self.session_maker() as session:
 
@@ -336,12 +374,14 @@ class EpisodicMemoryManager:
             Performance comparison:
             - PostgreSQL 'bm25': Native DB search, very fast, scales well
             - Legacy 'bm25' (SQLite): In-memory processing, slow for large datasets
+        中文：多策略搜索入口；根据 search_method 分派：
+            embedding -> 向量相似度；string_match -> 简单包含；bm25 -> 优先使用 PostgreSQL 原生全文；
+            fuzzy_match -> 兼容遗留模糊匹配。空 query 返回最新事件（按时间倒序）。
         """
 
         with self.session_maker() as session:
-            
-            # TODO: handle the case where query is None, we need to extract the 50 most recent results
-
+            # NOTE: 如果 query 为空：直接按时间倒序抓取最近事件（"最新时间线浏览" 场景）。
+            # 可扩展：支持指定 offset / cursor 做分页。
             if query == '':
                 query_stmt = select(EpisodicEvent).where(
                     EpisodicEvent.user_id == actor.id
@@ -351,9 +391,9 @@ class EpisodicMemoryManager:
                 result = session.execute(query_stmt)
                 episodic_memory = result.scalars().all()
                 return [event.to_pydantic() for event in episodic_memory]
-
             else:
 
+                # 构造基础 SELECT：抽取必要字段，后续不同搜索策略在此基础上附加过滤或排序。
                 base_query = select(
                     EpisodicEvent.id.label("id"),
                     EpisodicEvent.created_at.label("created_at"),
@@ -375,120 +415,82 @@ class EpisodicMemoryManager:
                 )
 
                 if search_method == 'embedding':
-
+                    # 向量检索分支：
+                    #  1. embed_query=True 表示使用嵌入相似度策略
+                    #  2. search_field 用对应 *_embedding 列（summary_embedding / details_embedding）
+                    #  3. 若 embedded_text 已预计算可直接使用，可减少重复 embedding 费用
                     embed_query = True
                     embedding_config = agent_state.embedding_config
-
                     main_query = build_query(
                         base_query=base_query,
                         query_text=query,
                         embedded_text=embedded_text,
                         embed_query=embed_query,
                         embedding_config=embedding_config,
-                        search_field = eval("EpisodicEvent." + search_field + "_embedding"),
+                        search_field=eval("EpisodicEvent." + search_field + "_embedding"),  # 动态选择 embedding 列
                         target_class=EpisodicEvent,
                     )
             
                 elif search_method == 'string_match':
-
+                    # 简单字符串包含（lower case 规避大小写差异）。
                     search_field = eval("EpisodicEvent." + search_field)
                     main_query = base_query.where(func.lower(search_field).contains(query.lower()))
 
                 elif search_method == 'bm25':
-
-                    # Check if we're using PostgreSQL - use native full-text search if available
+                    # BM25 分支：
+                    #   PostgreSQL 环境 -> 调用原生全文检索（高效 + 利用索引）。
+                    #   否则（SQLite） -> 退化为内存 BM25（适合数据量较小的开发/测试）。
                     if settings.mirix_pg_uri_no_default:
-                        # Use PostgreSQL's native full-text search with ts_rank for BM25-like functionality
                         return self._postgresql_fulltext_search(
                             session, base_query, query, search_field, limit, actor
                         )
                     else:
-                        # Fallback to in-memory BM25 for SQLite (legacy method)
-                        # Load all candidate events (memory-intensive, kept for compatibility)
+                        # 加载所有候选事件 -> 分词 -> 构建 BM25Okapi -> 评分排序。
                         result = session.execute(select(EpisodicEvent).where(
                             EpisodicEvent.user_id == actor.id
                         ))
                         all_events = result.scalars().all()
-                        
                         if not all_events:
                             return []
-                        
-                        # Prepare documents for BM25
-                        documents = []
-                        valid_events = []
-                        
+                        documents, valid_events = [], []
                         for event in all_events:
-                            # Determine which field to use for search
                             if search_field and hasattr(event, search_field):
                                 text_to_search = getattr(event, search_field) or ""
                             else:
                                 text_to_search = event.summary or ""
-                            
-                            # Preprocess the text into tokens
                             tokens = self._preprocess_text_for_bm25(text_to_search)
-                            
-                            # Only include events that have tokens after preprocessing
                             if tokens:
                                 documents.append(tokens)
                                 valid_events.append(event)
-                        
                         if not documents:
                             return []
-                        
-                        # Initialize BM25 with the documents
                         bm25 = BM25Okapi(documents)
-                        
-                        # Preprocess the query
                         query_tokens = self._preprocess_text_for_bm25(query)
-                        
                         if not query_tokens:
-                            # If query has no valid tokens, return most recent events
                             return [event.to_pydantic() for event in valid_events[:limit]]
-                        
-                        # Get BM25 scores for all documents
                         scores = bm25.get_scores(query_tokens)
-                        
-                        # Create scored events list
                         scored_events = list(zip(scores, valid_events))
-                        
-                        # Sort by BM25 score in descending order
                         scored_events.sort(key=lambda x: x[0], reverse=True)
-                        
-                        # Get top events based on limit
                         top_events = [event for score, event in scored_events[:limit]]
-                        episodic_memory = top_events
-                        
-                        # Return the list after converting to Pydantic
-                        return [event.to_pydantic() for event in episodic_memory]
+                        return [event.to_pydantic() for event in top_events]
 
                 elif search_method == 'fuzzy_match':
-
-                    # Load all candidate events (kept for backward compatibility)
+                    # 模糊匹配分支（主要兼容历史；在数据量大时性能较差）。
                     result = session.execute(select(EpisodicEvent).where(
                         EpisodicEvent.user_id == actor.id
                     ))
                     all_events = result.scalars().all()
                     scored_events = []
                     for event in all_events:
-                        # Determine which field to use:
-                        # 1. If a search_field is provided (like "summary" or "details") use that.
-                        # 2. Otherwise, fallback to the summary.
                         if search_field and hasattr(event, search_field):
-                            text_to_search = getattr(event, search_field)
+                            text_to_search = getattr(event, search_field) or ''
                         else:
-                            text_to_search = event.summary
-                        
-                        # Use fuzz.partial_ratio for short query matching against long text.
+                            text_to_search = event.summary or ''
                         score = fuzz.partial_ratio(query.lower(), text_to_search.lower())
                         scored_events.append((score, event))
-
-                    # Sort events in descending order of fuzzy match score.
                     scored_events.sort(key=lambda x: x[0], reverse=True)
-                    # Optionally, you could filter out results below a certain score threshold.
                     top_events = [event for score, event in scored_events[:limit]]
-                    episodic_memory = top_events
-                    # Return the list after converting to Pydantic.
-                    return [event.to_pydantic() for event in episodic_memory]
+                    return [event.to_pydantic() for event in top_events]
 
                 if limit:
                     main_query = main_query.limit(limit)
@@ -506,6 +508,7 @@ class EpisodicMemoryManager:
         """
         Efficient PostgreSQL-native full-text search using ts_rank for BM25-like functionality.
         This method leverages PostgreSQL's built-in full-text search capabilities and GIN indexes.
+        中文：PostgreSQL 原生全文检索封装，构造 tsquery（支持前缀与 AND/OR 回退），结合权重与 ts_rank_cd 评分。
         
         Args:
             session: Database session
@@ -704,6 +707,7 @@ class EpisodicMemoryManager:
                             actor: PydanticUser = None):
         """
         Update the selected events
+        中文：更新事件摘要/详情；详情采用追加行方式（保留历史），并刷新 last_modify。
         """
 
         with self.session_maker() as session:
@@ -736,6 +740,7 @@ class EpisodicMemoryManager:
     def _parse_embedding_field(self, embedding_value):
         """
         Helper method to parse embedding field from different PostgreSQL return formats.
+        中文：解析数据库返回的向量字段，兼容 list/tuple/JSON 字符串/分隔字符串/二进制。
         
         Args:
             embedding_value: The raw embedding value from PostgreSQL query

@@ -1,6 +1,31 @@
+"""temporary_message_accumulator.py
+
+临时多模态消息累积与分发模块（Memory Ingestion 前置缓冲层）。
+
+核心职责：
+    1. 短期缓冲：接收来自截屏、语音、文本输入的细粒度片段，暂存为一个“批次候选集”。
+    2. 上传协调：对需要云上传（如 GEMINI）的图片使用占位符跟踪异步进度，确保顺序一致性后再整体处理。
+    3. 记忆吸收触发：满足数量阈值后统一打包 -> 构造结构化 message payload -> 发送给 MetaMemory 或直接广播给各 Memory Agent。
+    4. 上下文拼接：可附带用户与聊天 Agent 最近对话，帮助抽取模型进行语义判断（"用户当前意图 / 任务"）。
+    5. 语音聚合：多段音频在最后阶段统一转写，减少模型调用开销。
+
+设计与边界：
+    - 顺序保证：对于含未完成上传的早期片段，后续内容需等待（防止时间线穿插错乱）。
+    - 资源释放：上传成功后可删除本地临时文件（OpenAI 路径 base64 化后）。
+    - 可扩展性：未来可接入增量阈值、时间窗口策略（如“满 N 条 或 超过 T 秒”）。
+    - 容错策略：单图失败不必阻塞整体（可在失败后附加占位文案）。
+
+线程安全：
+    使用 `_temporary_messages_lock` 保护 `temporary_messages`、`temporary_user_messages` 等共享结构。
+
+注意：
+    - 英文系统提示 / 字段 key 保持不变，确保下游解析与 prompt 稳定。
+    - 本文件所有新增为中文注释，不改业务逻辑。
+"""
+
 import os
 import time
-import uuid
+import uuid  # 未来可用于生成批次 id（当前未使用）
 import threading
 import copy
 import logging
@@ -8,12 +33,17 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from mirix.agent.app_constants import TEMPORARY_MESSAGE_LIMIT, GEMINI_MODELS, SKIP_META_MEMORY_MANAGER
-from mirix.constants import CHAINING_FOR_MEMORY_UPDATE
+from mirix.constants import CHAINING_FOR_MEMORY_UPDATE  # 记忆更新时的链式触发配置（英文常量保持不变）
 from mirix.voice_utils import process_voice_files, convert_base64_to_audio_segment
 from mirix.agent.app_utils import encode_image
 
 def get_image_mime_type(image_path):
-    """Get MIME type for image files."""
+    """根据文件扩展名推断图像的 MIME 类型。
+
+    说明：
+    - 仅基础判断，不读取文件头；适合快速转换 base64 Data URI。
+    - 若扩展名未知，默认使用 'image/png' 作为安全回退。
+    """
     if image_path.lower().endswith(('.png', '.PNG')):
         return 'image/png'
     elif image_path.lower().endswith(('.jpg', '.jpeg', '.JPG', '.JPEG')):
@@ -26,13 +56,28 @@ def get_image_mime_type(image_path):
         return 'image/png'  # Default fallback
 
 class TemporaryMessageAccumulator:
-    """
-    Handles accumulation and processing of temporary messages (screenshots, voice, text)
-    for memory absorption into different agent types.
+    """临时消息累积器。
+
+    功能：
+    - 暂存多模态内容（截屏、语音片段、文本），在满足数量阈值后打包发送。
+    - 处理上传占位符（pending -> completed）状态转换。
+    - 支持追加用户与助手对话以增强“当前任务”语境。
+    - 可路由到 Meta Memory（集中决策）或直接并行分发各具体记忆 Agent。
     """
     
     def __init__(self, client, google_client, timezone, upload_manager, message_queue, 
                  model_name, temporary_message_limit=TEMPORARY_MESSAGE_LIMIT):
+        """初始化累积器。
+
+        参数说明：
+        - client: 主应用/后端客户端对象，封装发送消息 / 服务端引用。
+        - google_client: 谷歌相关上传/接口客户端（GEMINI 图像上传依赖）。
+        - timezone: pytz 时区对象，用于标准化时间戳。
+        - upload_manager: 异步上传管理器（可处理文件占位符、状态查询、清理）。
+        - message_queue: 内部消息队列，用于向各 Agent 派发处理请求。
+        - model_name: 当前使用的模型名称（决定是否需要上传）。
+        - temporary_message_limit: 触发一次记忆吸收的消息数量阈值。
+        """
         self.client = client
         self.google_client = google_client
         self.timezone = timezone
@@ -62,7 +107,20 @@ class TemporaryMessageAccumulator:
         self.upload_start_times = {}  # Track when uploads started for cleanup purposes
     
     def add_message(self, full_message, timestamp, delete_after_upload=True, async_upload=True):
-        """Add a message to temporary storage."""
+        """添加一条临时消息（可能包含图片、语音、文本）。
+
+        full_message 结构预期：{
+            'image_uris': [可选, 本地文件路径列表],
+            'voice_files': [可选, base64 语音片段列表],
+            'message': 文本内容 (str),
+            'sources': [可选，对应每张图的来源应用名]
+        }
+
+        参数：
+            timestamp: 外部生成的时间戳（可为 str / datetime / unix 数字）。
+            delete_after_upload: 针对非 GEMINI（本地路径 -> base64）模式，是否在吸收后删除原文件。
+            async_upload: 是否异步上传（GEMINI）。
+        """
         if self.needs_upload and self.upload_manager is not None:
             if 'image_uris' in full_message and full_message['image_uris']:
                 # Handle image uploads with optional sources information
@@ -147,7 +205,7 @@ class TemporaryMessageAccumulator:
                 # total_voice_files = sum(len(item.get('audio_segments', []) or []) for _, item in self.temporary_messages)
         
     def add_user_conversation(self, user_message, assistant_response):
-        """Add user conversation to temporary storage."""
+        """追加用户与助手的一轮对话，用于后续在同批内容吸收时一并发送。"""
         self.temporary_user_messages[-1].extend([
             {'role': 'user', 'content': user_message},
             {'role': 'assistant', 'content': assistant_response}
@@ -156,7 +214,13 @@ class TemporaryMessageAccumulator:
 
     
     def should_absorb_content(self):
-        """Check if content should be absorbed into memory and return ready messages."""
+        """判断是否达到吸收条件，并返回“就绪的”消息列表。
+
+        策略：
+        - GEMINI：必须保证按时间序所有前序消息的图片上传完成，否则阻塞后续（保持顺序一致）。
+        - 非 GEMINI：无上传依赖，达到数量阈值直接返回所有暂存消息。
+        返回：ready_messages 列表或空列表。
+        """
         
         if self.needs_upload:
             with self._temporary_messages_lock:
@@ -233,10 +297,12 @@ class TemporaryMessageAccumulator:
                     return []
     
     def get_recent_images_for_chat(self, current_timestamp):
-        """Get the most recent images for chat context (non-blocking).
-        
-        Returns:
-            List of tuples: (timestamp, file_ref, sources) where sources may be None
+        """提取最近 1 分钟内的图像用于即时对话上下文（非阻塞）。
+
+        返回：[(timestamp, file_ref, source_or_None), ...]
+        说明：
+        - 会尝试解析多种 timestamp 格式（字符串 / datetime / unix）。
+        - GEMINI 若仍在 pending 状态则跳过该图像，不阻塞对话。
         """
         with self._temporary_messages_lock:
             # Get the most recent content
@@ -306,7 +372,13 @@ class TemporaryMessageAccumulator:
             return most_recent_images
     
     def absorb_content_into_memory(self, agent_states, ready_messages=None, user_id=None):
-        """Process accumulated content and send to memory agents."""
+        """执行一次吸收：将已就绪内容转为结构化消息并派发给记忆代理。
+
+        参数：
+            agent_states: 包含各 Memory Agent 状态与 ID 的容器。
+            ready_messages: （可选）预先计算好的就绪消息（绕过内部判断）。
+            user_id: 当前用户名/标识（用于多用户场景区分）。
+        """
 
         if ready_messages is not None:
             # Use the pre-processed ready messages
@@ -446,17 +518,17 @@ class TemporaryMessageAccumulator:
         message, user_message_added = self._add_user_conversation_to_message(message)
        
         if SKIP_META_MEMORY_MANAGER:
-            # Add system instruction
+            # Add system instruction (英文内容保持不变；下方中文说明仅注释，不会被模型看到)
             if user_message_added:
-                system_message = "[System Message] Interpret the provided content and the conversations between the user and the chat agent, according to what the user is doing, trigger the appropriate memory update."
+                system_message = "[System Message] Interpret the provided content and the conversations between the user and the chat agent, according to what the user is doing, trigger the appropriate memory update."  # 中文：解释提供的内容及对话，根据用户当前行为，触发相应记忆类型的更新
             else:
-                system_message = "[System Message] Interpret the provided content, according to what the user is doing, extract the important information matching your memory type and save it into the memory."
+                system_message = "[System Message] Interpret the provided content, according to what the user is doing, extract the important information matching your memory type and save it into the memory."  # 中文：解释内容，根据用户行为抽取与你负责的记忆类型相关的重要信息并保存
         else:
             # Add system instruction for meta memory manager
             if user_message_added:
-                system_message = "[System Message] As the meta memory manager, analyze the provided content and the conversations between the user and the chat agent. Based on what the user is doing, determine which memory should be updated (episodic, procedural, knowledge vault, semantic, core, and resource)."
+                system_message = "[System Message] As the meta memory manager, analyze the provided content and the conversations between the user and the chat agent. Based on what the user is doing, determine which memory should be updated (episodic, procedural, knowledge vault, semantic, core, and resource)."  # 中文：作为元记忆管理器，分析内容与对话，判断需要更新哪些记忆类型
             else:
-                system_message = "[System Message] As the meta memory manager, analyze the provided content. Based on the content, determine what memories need to be updated (episodic, procedural, knowledge vault, semantic, core, and resource)"
+                system_message = "[System Message] As the meta memory manager, analyze the provided content. Based on the content, determine what memories need to be updated (episodic, procedural, knowledge vault, semantic, core, and resource)"  # 中文：作为元记忆管理器，分析内容本身，决定要更新的记忆类型
             
         message.append({
             'type': 'text',
@@ -493,7 +565,14 @@ class TemporaryMessageAccumulator:
         self._cleanup_processed_content(ready_to_process, user_message_added)
     
     def _build_memory_message(self, ready_to_process, voice_content):
-        """Build the message content for memory agents."""
+        """构建发送给记忆系统的结构化消息列表。
+
+        产出格式：[{ 'type': 'text' | 'image_data' | 'google_cloud_file_uri', ...}, ...]
+        逻辑：
+        - 图像按来源分组并加上时间戳。
+        - 语音先批量转写，附加到文本。
+        - 用户纯文本逐条附带原始时间戳。
+        """
 
         # Collect content organized by source
         images_by_source = {}  # source_name -> [(timestamp, file_refs)]
@@ -614,7 +693,7 @@ class TemporaryMessageAccumulator:
         return message_parts
     
     def _add_user_conversation_to_message(self, message):
-        """Add user conversation to the message if it exists."""
+        """若存在缓存的 user<->assistant 对话，将其追加到 message 末尾。"""
         user_message_added = False
         if len(self.temporary_user_messages[-1]) > 0:
             user_conversation = 'The following are the conversations between the user and the Chat Agent while capturing this content:\n'
@@ -632,7 +711,7 @@ class TemporaryMessageAccumulator:
         return message, user_message_added
     
     def _send_to_meta_memory_agent(self, message, existing_file_uris, agent_states, user_id=None):
-        """Send the processed content to the meta memory agent."""
+        """发送给 Meta Memory Agent 以决策分发路径。"""
         
         payloads = {
             'message': message,
@@ -648,7 +727,7 @@ class TemporaryMessageAccumulator:
         return response, agent_type
 
     def _send_to_memory_agents_separately(self, message, existing_file_uris, agent_states, user_id=None):
-        """Send the processed content to all memory agents in parallel."""
+        """绕过 Meta Memory，直接并行发送给各具体记忆 Agent。"""
         import time
         import threading
         
@@ -679,7 +758,7 @@ class TemporaryMessageAccumulator:
         overall_end = time.time()
   
     def _cleanup_processed_content(self, ready_to_process, user_message_added):
-        """Clean up processed content and mark files as processed."""
+        """清理已处理内容：删除临时文件 / 标记占位符完成 / 丢弃已用对话缓存。"""
         # Mark processed files as processed in database and cleanup upload results (only for GEMINI models)
         if self.needs_upload and self.upload_manager is not None:
             for timestamp, item in ready_to_process:
@@ -714,7 +793,7 @@ class TemporaryMessageAccumulator:
                 self.temporary_user_messages.pop(0)
     
     def _delete_local_image_file(self, image_path):
-        """Delete a local image file with retry logic."""
+        """删除本地图像文件（带重试机制，防止占用导致删除失败）。"""
         try:
             max_retries = 10
             retry_count = 0
@@ -737,7 +816,7 @@ class TemporaryMessageAccumulator:
             self.logger.error(f"Error while trying to delete image file {image_path}: {e}")
 
     def _cleanup_file_after_upload(self, filenames, placeholders):
-        """Clean up local file after upload completes."""
+        """在上传占位符完成后删除对应的本地临时文件。"""
 
         if self.upload_manager is None:
             return  # No upload manager for non-GEMINI models
@@ -787,12 +866,12 @@ class TemporaryMessageAccumulator:
                     pass
     
     def get_message_count(self):
-        """Get the current count of temporary messages."""
+        """返回当前暂存消息数量。"""
         with self._temporary_messages_lock:
             return len(self.temporary_messages)
     
     def get_upload_status_summary(self):
-        """Get a summary of current upload statuses for debugging."""
+        """调试用：汇总当前上传状态。"""
         summary = {
             'total_messages': len(self.temporary_messages),
         }
@@ -804,7 +883,7 @@ class TemporaryMessageAccumulator:
         return summary
     
     def update_model(self, new_model_name):
-        """Update the model name and related settings."""
+        """更新模型名称及依赖配置（切换是否需要上传逻辑）。"""
         self.model_name = new_model_name
         self.needs_upload = new_model_name in GEMINI_MODELS
         self.logger = logging.getLogger(f"Mirix.TemporaryMessageAccumulator.{new_model_name}")

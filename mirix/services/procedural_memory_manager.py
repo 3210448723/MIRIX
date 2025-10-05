@@ -1,3 +1,16 @@
+"""procedural_memory_manager.py
+程序性记忆管理器（ProceduralMemoryManager）业务逻辑：
+
+职责：管理“流程 / 步骤”类知识（如部署流程、操作指令序列），提供 CRUD + 多策略检索。
+特性：
+ - steps 字段为顺序步骤数组，可拼接生成 steps_embedding。
+ - 支持 embedding / string_match / bm25 / fuzzy_match 多种查询。
+ - PostgreSQL 下使用原生全文 + 权重；SQLite 退回内存 BM25。
+ - BUILD_EMBEDDINGS_FOR_MEMORY 关闭时跳过向量生成。
+
+说明：只添加中文注释，不改动逻辑。
+"""
+
 import uuid
 from typing import List, Optional, Dict, Any
 import json
@@ -28,7 +41,10 @@ from mirix.settings import settings
 from mirix.constants import BUILD_EMBEDDINGS_FOR_MEMORY
 
 class ProceduralMemoryManager:
-    """Manager class to handle business logic related to Procedural Memory Items."""
+    """Manager class to handle business logic related to Procedural Memory Items.
+
+    中文：程序性记忆管理器，聚焦“如何做”的结构化步骤集合。
+    """
 
     def __init__(self):
         from mirix.server.server import db_context
@@ -37,6 +53,7 @@ class ProceduralMemoryManager:
     def _clean_text_for_search(self, text: str) -> str:
         """
         Clean text by removing punctuation and normalizing whitespace.
+        中文：清洗文本 -> 去标点 -> 小写 -> 空白归一，提升匹配稳定性。
         
         Args:
             text: Input text to clean
@@ -60,6 +77,7 @@ class ProceduralMemoryManager:
     def _preprocess_text_for_bm25(self, text: str) -> List[str]:
         """
         Preprocess text for BM25 search by tokenizing and cleaning.
+        中文：BM25 预处理，清洗后按空格切词并过滤短 token。
         
         Args:
             text: Input text to preprocess
@@ -80,6 +98,7 @@ class ProceduralMemoryManager:
     def _parse_embedding_field(self, embedding_value):
         """
         Helper method to parse embedding field from different PostgreSQL return formats.
+        中文：解析数据库返回 embedding 的多种格式（列表/JSON/字符串/二进制）。
         
         Args:
             embedding_value: The raw embedding value from PostgreSQL query
@@ -137,6 +156,7 @@ class ProceduralMemoryManager:
     def _count_word_matches(self, item_data: Dict[str, Any], query_words: List[str], search_field: str = '') -> int:
         """
         Count how many of the query words are present in the procedural memory item data.
+        中文：统计查询词命中数量（用于简单匹配评分）。
         
         Args:
             item_data: Dictionary containing procedural memory item data
@@ -181,6 +201,7 @@ class ProceduralMemoryManager:
         """
         Efficient PostgreSQL-native full-text search using ts_rank_cd for BM25-like functionality.
         This method leverages PostgreSQL's built-in full-text search capabilities and GIN indexes.
+        中文：PostgreSQL 原生全文检索（权重 + ts_rank_cd），支持多字段权重合并。
         
         Args:
             session: Database session
@@ -497,16 +518,19 @@ class ProceduralMemoryManager:
         with self.session_maker() as session:
             
             if query == '':
+                # 中文：无查询词 -> 直接按创建时间逆序列出该用户全部程序性记忆
                 query_stmt = select(ProceduralMemoryItem).where(
                     ProceduralMemoryItem.user_id == actor.id
                 ).order_by(ProceduralMemoryItem.created_at.desc())
                 if limit:
+                    # 中文：限制返回数量，避免一次性传输过多记录
                     query_stmt = query_stmt.limit(limit)
                 result = session.execute(query_stmt)
                 procedural_memory = result.scalars().all()
                 return [event.to_pydantic() for event in procedural_memory]
             
             else:
+                # 中文：存在查询词 -> 构建选择必要列的基础查询（便于统一映射）
 
                 base_query = select(
                     ProceduralMemoryItem.id.label("id"),
@@ -527,6 +551,8 @@ class ProceduralMemoryManager:
                 )
 
                 if search_method == 'embedding':
+                    # 中文：向量检索：根据 search_field 选择 steps_embedding / summary_embedding
+                    # embed_query=True => 根据 query 生成查询向量并做相似度排序
 
                     main_query = build_query(
                         base_query=base_query,
@@ -539,6 +565,8 @@ class ProceduralMemoryManager:
                     )
 
                 elif search_method == 'string_match':
+                    # 中文：字段文本包含匹配。steps 为 JSON 数组，需要在 PG 下 regexp_replace 去除符号再 lower LIKE。
+                    # SQLite 退化为直接对 steps 文本字符串匹配。
 
                     if search_field == 'steps':
                         # For JSON array field, convert to text first and then search
@@ -555,6 +583,8 @@ class ProceduralMemoryManager:
                         main_query = base_query.where(func.lower(search_field_obj).contains(query.lower()))
 
                 elif search_method == 'bm25':
+                    # 中文：BM25 相关性检索。PG 使用全文；SQLite 退化为内存 BM25。
+                    # 注意：SQLite 路径会把全部记录拉入内存，数据大时需警惕性能。
                     
                     # Check if we're using PostgreSQL - use native full-text search if available
                     if settings.mirix_pg_uri_no_default:
@@ -563,6 +593,8 @@ class ProceduralMemoryManager:
                             session, base_query, query, search_field, limit, actor
                         )
                     else:
+                        # 中文：内存 BM25 流程
+                        # 1. 拉取所有项 -> 2. 依据指定字段拼接文本 -> 3. 生成 tokens -> 4. 排序返回
                         # Fallback to in-memory BM25 for SQLite (legacy method)
                         # Load all candidate items (memory-intensive, kept for compatibility)
                         result = session.execute(select(ProceduralMemoryItem).where(
@@ -639,6 +671,7 @@ class ProceduralMemoryManager:
                         return [item.to_pydantic() for item in top_items]
 
                 elif search_method == 'fuzzy_match':
+                    # 中文：模糊匹配（partial_ratio），适合短 query，对 steps/summary 等长文本做子串近似
                     # For fuzzy matching, load all candidate items into memory.
                     result = session.execute(select(ProceduralMemoryItem).where(
                         ProceduralMemoryItem.user_id == actor.id
@@ -663,12 +696,14 @@ class ProceduralMemoryManager:
                     return [item.to_pydantic() for item in top_items]
 
                 if limit:
+                    # 中文：施加 limit 限制
                     main_query = main_query.limit(limit)
 
                 results = list(session.execute(main_query))
                 
                 procedures = []
                 for row in results:
+                    # 中文：行映射 -> ORM 实例 -> Pydantic 输出
                     data = dict(row._mapping)
                     procedures.append(ProceduralMemoryItem(**data))
                 

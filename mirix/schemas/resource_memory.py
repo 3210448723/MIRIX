@@ -1,3 +1,10 @@
+"""resource_memory.py
+资源型记忆（Resource Memory）Schema。
+
+用途：表示外部/内部各类文档、片段、文件解析内容等资源对象，可用于搜索、引用、摘要补全。
+仅添加中文注释，不修改原有字段与逻辑。
+"""
+
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
@@ -9,8 +16,11 @@ from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.utils import get_utc_time
 
 class ResourceMemoryItemBase(MirixBase):
-    """
-    Base schema for resource memory items - storing docs, user files, references, etc.
+    """Base schema for resource memory items - storing docs, user files, references, etc.
+
+    中文：资源记忆基础模型。content 可较长（全文 / 片段），summary 是压缩摘要。
+    resource_type 用于标识来源类型（如 pdf_text / markdown / html_section）。
+    tree_path：层级分类，便于按目录/主题分组检索。
     """
     __id_prefix__ = "res_item"
     title: str = Field(..., description="Short name/title of the resource")
@@ -20,8 +30,11 @@ class ResourceMemoryItemBase(MirixBase):
     tree_path: List[str] = Field(..., description="Hierarchical categorization path as an array of strings (e.g., ['documents', 'work', 'projects'])")
 
 class ResourceMemoryItem(ResourceMemoryItemBase):
-    """
-    Full schema for resource memory items with DB fields.
+    """Full schema for resource memory items with DB fields.
+
+    中文：资源实体，包含创建/更新时间、last_modify（最近操作）、summary_embedding（摘要向量）。
+    validator 会自动对 embedding 长度做填充以统一维度。
+    metadata_：可存储标签、原文件路径、偏移、格式、解析策略等。
     """
     id: Optional[str] = Field(None, description="Unique identifier for the resource memory item")
     user_id: str = Field(..., description="The id of the user who generated the resource")
@@ -49,7 +62,12 @@ class ResourceMemoryItem(ResourceMemoryItemBase):
         return embedding
 
 class ResourceMemoryItemUpdate(MirixBase):
-    """Schema for updating an existing resource memory item."""
+    """Schema for updating an existing resource memory item.
+
+    中文：资源记忆 Patch 更新模型。除 id 外均可选，提供的字段才会被修改。
+    可用于补写 content、替换 summary、更新 tree_path 或附加 metadata。
+    updated_at 自动刷新。
+    """
     id: str = Field(..., description="Unique ID for this resource memory entry")
     title: Optional[str] = Field(None, description="Short name/title of the resource")
     summary: Optional[str] = Field(None, description="Short description or summary of the resource")

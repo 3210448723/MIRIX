@@ -1,3 +1,10 @@
+"""knowledge_vault.py
+知识库 / 机密信息（Knowledge Vault）Schema。
+
+用于存储敏感或高价值的持久化条目（如凭证、关键配置、书签等）。
+仅添加中文注释，不修改字段和逻辑。
+"""
+
 from datetime import datetime
 from typing import Dict, Optional, Any, List
 
@@ -10,8 +17,10 @@ from mirix.utils import get_utc_time
 
 
 class KnowledgeVaultItemBase(MirixBase):
-    """
-    Base schema for knowledge vault items containing common fields.
+    """Base schema for knowledge vault items containing common fields.
+
+    中文：知识库基础条目模型。包含类型（entry_type）、来源（source）、敏感级别（sensitivity）、核心值（secret_value）及说明（caption）。
+    注意：这里并未直接区分是否需要加密存储，实际加密/脱敏可在数据访问层或存储层实现。
     """
     __id_prefix__ = "kv_item"
     entry_type: str = Field(..., description="Category (e.g., 'credential', 'bookmark', 'api_key')")
@@ -22,13 +31,11 @@ class KnowledgeVaultItemBase(MirixBase):
 
 
 class KnowledgeVaultItem(KnowledgeVaultItemBase):
-    """
-    Representation of a knowledge vault item for storing credentials, bookmarks, etc.
-    
-    Additional Parameters:
-        id (str): Unique ID for this knowledge vault entry.
-        created_at (datetime): Creation timestamp.
-        updated_at (Optional[datetime]): Last update timestamp.
+    """Representation of a knowledge vault item for storing credentials, bookmarks, etc.
+
+    中文：持久化实体，包含 id / 创建 / 更新时间，last_modify 用于记录最近操作。
+    caption_embedding：针对 caption 的向量，用于语义检索（如查找某类凭证说明）。
+    metadata_：可存储标签、权限标识、使用统计等。
     """
     id: Optional[str] = Field(None, description="Unique identifier for the knowledge vault item")
     user_id: str = Field(..., description="The id of the user who generated the knowledge vault item")
@@ -57,19 +64,18 @@ class KnowledgeVaultItem(KnowledgeVaultItemBase):
         return embedding
 
 class KnowledgeVaultItemCreate(KnowledgeVaultItemBase):
-    """
-    Schema for creating a new knowledge vault item.
-    
-    Inherits all required fields from KnowledgeVaultItemBase.
+    """Schema for creating a new knowledge vault item.
+
+    中文：创建模型，直接复用基础字段；若需要额外安全校验由上层逻辑处理。
     """
     pass
 
 
 class KnowledgeVaultItemUpdate(MirixBase):
-    """
-    Schema for updating an existing knowledge vault item.
-    
-    All fields (except id) are optional so that only provided fields are updated.
+    """Schema for updating an existing knowledge vault item.
+
+    中文：Patch 更新模型。除 id 外全部可选，提供即修改。updated_at 自动刷新。
+    可用于轮换 secret_value、修改说明 caption、调整敏感级别或添加 metadata。
     """
     id: str = Field(..., description="Unique ID for this knowledge vault entry")
     entry_type: Optional[str] = Field(None, description="Category (e.g., 'credential', 'bookmark', 'api_key')")
@@ -87,7 +93,8 @@ class KnowledgeVaultItemUpdate(MirixBase):
     embedding_config: Optional[EmbeddingConfig] = Field(None, description="The embedding configuration used by the event")
 
 class KnowledgeVaultItemResponse(KnowledgeVaultItem):
-    """
-    Response schema for knowledge vault items with additional fields that might be needed by the API.
+    """Response schema for knowledge vault items with additional fields that might be needed by the API.
+
+    中文：响应模型（当前未扩展，可作为未来附加脱敏处理或权限过滤的输出层）。
     """
     pass

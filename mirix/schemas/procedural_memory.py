@@ -9,8 +9,11 @@ from mirix.utils import get_utc_time
 from mirix.schemas.embedding_config import EmbeddingConfig
 
 class ProceduralMemoryItemBase(MirixBase):
-    """
-    Base schema for storing procedural knowledge (e.g., workflows, methods).
+    """Base schema for storing procedural knowledge (e.g., workflows, methods).
+
+    中文：程序性记忆基础模型。描述一套可重复执行的流程或技能。
+    steps：按顺序的步骤集合；每个步骤可在上层转换为工具调用建议或展示给用户。
+    tree_path：层级分类（如 ['workflows','development','testing']）。
     """
     __id_prefix__ = "proc_item"
     entry_type: str = Field(..., description="Category (e.g., 'workflow', 'guide', 'script')")
@@ -19,8 +22,12 @@ class ProceduralMemoryItemBase(MirixBase):
     tree_path: List[str] = Field(..., description="Hierarchical categorization path as an array of strings (e.g., ['workflows', 'development', 'testing'])")
 
 class ProceduralMemoryItem(ProceduralMemoryItemBase):
-    """
-    Full procedural memory item schema, with database-related fields.
+    """Full procedural memory item schema, with database-related fields.
+
+    中文扩展：
+    * steps_embedding：可为全部步骤拼接文本生成的向量，用于“寻找相似流程”。
+    * last_modify：记录最近操作及时间。
+    * 其余 embedding 与其他记忆类型一致，统一做长度填充。
     """
     id: Optional[str] = Field(None, description="Unique identifier for the procedural memory item")
     user_id: str = Field(..., description="The id of the user who generated the procedure")
@@ -50,7 +57,11 @@ class ProceduralMemoryItem(ProceduralMemoryItemBase):
         return embedding
 
 class ProceduralMemoryItemUpdate(MirixBase):
-    """Schema for updating an existing procedural memory item."""
+    """Schema for updating an existing procedural memory item.
+
+    中文：程序性记忆更新模型，除 id 外字段可选。提供的字段将覆盖原值。
+    updated_at 自动刷新；文本变化可触发上层重新生成相应 embedding。
+    """
     id: str = Field(..., description="Unique ID for this procedural memory entry")
     entry_type: Optional[str] = Field(None, description="Category (e.g., 'workflow', 'guide', 'script')")
     summary: Optional[str] = Field(None, description="Short descriptive text")

@@ -41,7 +41,7 @@ from mirix.interface import AgentInterface
 from mirix.llm_api.helpers import calculate_summarizer_cutoff, get_token_counts_for_messages, is_context_overflow_error
 from mirix.llm_api.llm_api_tools import create
 from mirix.utils import num_tokens_from_functions, num_tokens_from_messages
-from mirix.memory import summarize_messages
+from mirix.memory import summarize_messages  # 用于在对话上下文过长或触发阈值时生成摘要以减轻 token 压力（函数本体在 memory.py 中）
 from mirix.orm import User
 from mirix.orm.enums import ToolType
 from mirix.schemas.agent import AgentState, AgentStepResponse, UpdateAgent
@@ -110,6 +110,20 @@ class BaseAgent(ABC):
 
 
 class Agent(BaseAgent):
+    """通用智能体基类实现（含记忆/工具/消息调度集成）。
+
+    说明：
+        本类体量较大，承担：
+            - LLM 对话与工具调用编排
+            - 多类型记忆（episodic / semantic / procedural / resource / knowledge_vault）读写协调
+            - 函数工具执行沙箱、规则判定、重试与上下文截断
+            - Summarizer 触发（内存压力管理）
+
+    中文注释策略：
+        - 不改任何英文常量、协议字段、函数签名
+        - 在关键步骤（工具过滤、强制首调用、重试、内存截断）插入中文解释
+        - 避免在极热路径添加大段注释阻碍阅读（保持聚焦）
+    """
     def __init__(
         self,
         interface: Optional[AgentInterface],
@@ -187,7 +201,16 @@ class Agent(BaseAgent):
         # Note: Logger is already initialized earlier in constructor
 
     def load_last_function_response(self):
-        """Load the last function response from message history"""
+        """从历史消息中逆序检索最近一次函数调用的结构化返回。
+
+        用途：
+            - 供工具规则 (ToolRulesSolver) 判断下一步允许的工具（例如基于上一次结果进行分支）
+        策略：
+            - 仅扫描 role=tool 且内容可解析为 JSON 且含 "message" 字段的消息
+            - 第一次命中即返回；未找到返回 None
+        注意：
+            - 若 JSON 解析失败抛出 ValueError（保持显式反馈，利于调试数据污染）
+        """
         in_context_messages = self.agent_manager.get_in_context_messages(agent_id=self.agent_state.id, actor=self.user)
         for i in range(len(in_context_messages) - 1, -1, -1):
             msg = in_context_messages[i]
@@ -201,14 +224,11 @@ class Agent(BaseAgent):
         return None
 
     def update_topic_if_changed(self, topic: str) -> bool:
-        """
-        Update the agent's topic if it has changed.
+        """若主题变更则持久化更新。
 
-        Args:
-            topic (str): the new topic
-
-        Returns:
-            modified (bool): whether the topic was updated
+        触发场景：
+            - 工具调用中 send_message / 上游逻辑修改 agent_state.topic
+        返回：是否发生更新（布尔）
         """
         if self.agent_state.topic != topic:
             self.agent_manager.update_topic(
@@ -221,14 +241,13 @@ class Agent(BaseAgent):
         return False
 
     def update_memory_if_changed(self, new_memory: Memory) -> bool:
-        """
-        Update internal memory object and system prompt if there have been modifications.
+        """检测 Memory 编译结果是否变化，若变化则逐 block 更新并重新装载。
 
-        Args:
-            new_memory (Memory): the new memory object to compare to the current memory object
-
-        Returns:
-            modified (bool): whether the memory was updated
+        对比方式：`Memory.compile()` 结果字符串；若不同：
+            1. 遍历 block labels，找出值发生改变的 block 执行更新
+            2. 重新从数据库查询 block 列表构建新的 Memory 对象
+        不触发：不重建 system prompt（留待上层 step 前统一处理）
+        返回：是否有更新
         """
         if self.agent_state.memory.compile() != new_memory.compile():
             # update the blocks (LRW) in the DB
